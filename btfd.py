@@ -5,6 +5,7 @@ import os
 import os.path
 import re
 import shlex
+import shutil
 import subprocess
 import sys
 
@@ -32,9 +33,9 @@ class Environment:
     def virtualenv_parent_path(self):
         return os.path.join(self.base_path, 'venv')
 
-    def ensure_virtualenv_parent_path_exists(self):
-        if not os.path.exists(self.virtualenv_parent_path):
-            os.mkdir(self.virtualenv_parent_path)
+    @cached_property
+    def html_base_path(self):
+        return os.path.join(self.base_path, 'html')
 
     def branch_name_exists_in_master_repo(self, name):
         return any(head.name == name for head in self.master_repo.heads)
@@ -53,11 +54,14 @@ class Environment:
 
         return version_branches
 
-    def update(self):
+    def update(self, branches=None):
+        print("Pulling from master")
         self.master_repo.remote().pull()
 
         for branch in self.get_remote_branches():
-            branch.update()
+            if branches is None or branch.version_string in branches:
+                print("Updating branch %s" % branch.version_string)
+                branch.update()
 
     @staticmethod
     def create(repository_url, path=None):
@@ -96,7 +100,7 @@ class VersionBranch:
         return 'stable/%d.%d.x' % self.version
 
     def should_build(self):
-        return self.version >= (0, 8)
+        return self.version >= (0, 4)
 
     def python_version(self):
         return 'python3.6' if self.version >= (1, 10) else 'python2.7'
@@ -108,6 +112,10 @@ class VersionBranch:
     @cached_property
     def docs_path(self):
         return os.path.join(self.path, 'docs')
+
+    @cached_property
+    def built_html_path(self):
+        return os.path.join(self.docs_path, '_build', 'html')
 
     def update_repo(self):
         if os.path.exists(self.path):
@@ -126,6 +134,10 @@ class VersionBranch:
     def virtualenv_path(self):
         return os.path.join(self.env.virtualenv_parent_path, self.version_string)
 
+    @cached_property
+    def html_path(self):
+        return os.path.join(self.env.html_base_path, 'en', 'v' + self.version_string)
+
     def update(self):
         # create a local tracking branch for this version if none exists already
         if not self.env.branch_name_exists_in_master_repo(self.local_name):
@@ -141,13 +153,24 @@ class VersionBranch:
             subprocess.call(['virtualenv', self.virtualenv_path, '--python=%s' % self.python_version()])
 
         pip_cmd = os.path.join(self.virtualenv_path, 'bin', 'pip')
-        subprocess.call([pip_cmd, 'install', '-e', self.path + '[docs]'])
+        if self.version >= (1, 4):
+            subprocess.call([pip_cmd, 'install', '-e', self.path + '[docs]'])
+        elif self.version >= (1, 0):
+            subprocess.call([pip_cmd, 'install', '-e', self.path])
+            subprocess.call([pip_cmd, 'install', '-r', os.path.join(self.path, 'requirements-dev.txt')])
+        else:
+            subprocess.call([pip_cmd, 'install', '-e', self.path])
+            subprocess.call([pip_cmd, 'install', 'Sphinx<2.0', 'sphinx-rtd-theme'])
 
         activate_cmd = os.path.join(self.virtualenv_path, 'bin', 'activate')
         subprocess.call(
             'source %s && make -C %s html' % (shlex.quote(activate_cmd), shlex.quote(self.docs_path)),
             shell=True
         )
+        if os.path.exists(self.html_path):
+            shutil.rmtree(self.html_path, ignore_errors=False)
+        os.makedirs(self.env.html_base_path, exist_ok=True)
+        shutil.copytree(self.built_html_path, self.html_path)
 
 
 class PrintProgress(RemoteProgress):
@@ -160,7 +183,11 @@ def command_init(args):
 
 
 def command_update(args):
-    Environment(args.path).update()
+    if args.branch:
+        branches = [args.branch]
+    else:
+        branches = None
+    Environment(args.path).update(branches=branches)
 
 
 parser = argparse.ArgumentParser()
@@ -173,6 +200,7 @@ parser_init.set_defaults(func=command_init)
 
 parser_update = subparsers.add_parser('update', help='Update docs')
 parser_update.add_argument('path', help='path to repository')
+parser_update.add_argument('branch', nargs='?', default=None, help='branch to update')
 parser_update.set_defaults(func=command_update)
 
 args = parser.parse_args()
