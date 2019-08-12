@@ -54,14 +54,14 @@ class Environment:
 
         return version_branches
 
-    def update(self, branches=None):
+    def update(self, branches=None, command_flags=None):
         print("Pulling from master")
         self.master_repo.remote().pull()
 
         for branch in self.get_remote_branches():
             if branches is None or branch.version_string in branches:
                 print("Updating branch %s" % branch.version_string)
-                branch.update()
+                branch.update(command_flags=command_flags)
 
     @staticmethod
     def create(repository_url, path=None):
@@ -138,7 +138,7 @@ class VersionBranch:
     def html_path(self):
         return os.path.join(self.env.html_base_path, 'en', 'v' + self.version_string)
 
-    def update(self):
+    def update(self, command_flags=None):
         # create a local tracking branch for this version if none exists already
         if not self.env.branch_name_exists_in_master_repo(self.local_name):
             local_branch = self.env.master_repo.create_head(self.local_name, self.remote_head)
@@ -150,23 +150,26 @@ class VersionBranch:
             return
 
         if not os.path.exists(self.virtualenv_path):
-            subprocess.call(['virtualenv', self.virtualenv_path, '--python=%s' % self.python_version()])
+            subprocess.check_call(['virtualenv', self.virtualenv_path, '--python=%s' % self.python_version()])
 
         pip_cmd = os.path.join(self.virtualenv_path, 'bin', 'pip')
         if self.version >= (1, 4):
-            subprocess.call([pip_cmd, 'install', '-e', self.path + '[docs]'])
+            subprocess.check_call([pip_cmd, 'install', '-e', self.path + '[docs]'])
         elif self.version >= (1, 0):
-            subprocess.call([pip_cmd, 'install', '-e', self.path])
-            subprocess.call([pip_cmd, 'install', '-r', os.path.join(self.path, 'requirements-dev.txt')])
+            subprocess.check_call([pip_cmd, 'install', '-e', self.path])
+            subprocess.check_call([pip_cmd, 'install', '-r', os.path.join(self.path, 'requirements-dev.txt')])
         else:
-            subprocess.call([pip_cmd, 'install', '-e', self.path])
-            subprocess.call([pip_cmd, 'install', 'Sphinx<2.0', 'sphinx-rtd-theme'])
+            subprocess.check_call([pip_cmd, 'install', '-e', self.path])
+            subprocess.check_call([pip_cmd, 'install', 'Sphinx<2.0', 'sphinx-rtd-theme'])
 
         activate_cmd = os.path.join(self.virtualenv_path, 'bin', 'activate')
-        subprocess.call(
-            'source %s && make -C %s html' % (shlex.quote(activate_cmd), shlex.quote(self.docs_path)),
-            shell=True
-        )
+        if command_flags:
+            command = 'source %s && make -C %s html -e SPHINXOPTS="%s"' % (
+                shlex.quote(activate_cmd), shlex.quote(self.docs_path), shlex.quote(command_flags)
+            )
+        else:
+            command = 'source %s && make -C %s html' % (shlex.quote(activate_cmd), shlex.quote(self.docs_path))
+        subprocess.check_call(command, shell=True)
         if os.path.exists(self.html_path):
             shutil.rmtree(self.html_path, ignore_errors=False)
         os.makedirs(self.env.html_base_path, exist_ok=True)
@@ -180,6 +183,14 @@ class PrintProgress(RemoteProgress):
 
 def command_init(args):
     Environment.create(args.repository, args.path)
+
+
+def command_build(args):
+    if args.branch:
+        branches = [args.branch]
+    else:
+        branches = None
+    Environment(args.path).update(branches=branches, command_flags="-a")
 
 
 def command_update(args):
@@ -198,7 +209,12 @@ parser_init.add_argument('repository', help='URL of repository')
 parser_init.add_argument('path', nargs='?', default=None, help='path to clone to')
 parser_init.set_defaults(func=command_init)
 
-parser_update = subparsers.add_parser('update', help='Update docs')
+parser_update = subparsers.add_parser('build', help='Rebuild docs (all files)')
+parser_update.add_argument('path', help='path to repository')
+parser_update.add_argument('branch', nargs='?', default=None, help='branch to rebuild')
+parser_update.set_defaults(func=command_build)
+
+parser_update = subparsers.add_parser('update', help='Update docs (build changed files only)')
 parser_update.add_argument('path', help='path to repository')
 parser_update.add_argument('branch', nargs='?', default=None, help='branch to update')
 parser_update.set_defaults(func=command_update)
