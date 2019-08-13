@@ -82,7 +82,7 @@ class Environment:
             if branches is None:
                 # building all branches
                 pass
-            elif branch.version_string in branches:
+            elif branch.version_string in branches or branch.remote_head.name in branches:
                 # building this branch
                 pass
             elif 'stable' in branches and branch == self.stable_branch:
@@ -102,7 +102,7 @@ class Environment:
         version_list = [
             branch.target_dir_name
             for branch in reversed(self.remote_branches)
-            if branch.should_build()
+            if branch.should_build() and branch.should_publish()
         ]
         version_list.insert(1, 'stable')
 
@@ -182,6 +182,10 @@ class Branch:
         )
         subprocess.check_call(command, shell=True)
 
+        if self.should_publish():
+            self.publish()
+
+    def publish(self):
         os.makedirs(self.env.html_base_path, exist_ok=True)
 
         html_path = os.path.join(self.env.html_base_path, 'en', self.target_dir_name)
@@ -197,6 +201,9 @@ class MasterBranch(Branch):
     target_dir_name = 'latest'
 
     def should_build(self):
+        return True
+
+    def should_publish(self):
         return True
 
     def python_version(self):
@@ -222,6 +229,21 @@ class VersionBranch(Branch):
 
     def should_build(self):
         return self.version >= (0, 4)
+
+    def should_publish(self):
+        # Only publish version branches if they have a 'final' version number
+        doc_options_filename = os.path.join(self.built_html_path, '_static', 'documentation_options.js')
+        if not os.path.exists(doc_options_filename):
+            return False
+
+        publish = False
+        with open(doc_options_filename) as f:
+            for line in f:
+                if re.match(r'^\s+VERSION:\s*\'\d+\.\d+(?:\.\d+)?\'', line):
+                    publish = True
+                    break
+
+        return publish
 
     def python_version(self):
         return 'python3.6' if self.version >= (1, 10) else 'python2.7'
