@@ -47,22 +47,33 @@ class Environment:
     def remote_branches(self):
         # find all remote branches matching the format origin/stable/N.N.x
         version_branches = []
-        for remote_ref in self.master_repo.remote().refs:
-            match = re.match(r'^origin/stable/(\d+)\.(\d+).x$', remote_ref.name)
+        master_branch = None
 
-            if match:
-                version_branches.append(VersionBranch(self, remote_ref, match.group(1), match.group(2)))
+        for remote_ref in self.master_repo.remote().refs:
+            if remote_ref.name == 'origin/master':
+                master_branch = MasterBranch(self, remote_ref)
+            else:
+                match = re.match(r'^origin/stable/(\d+)\.(\d+).x$', remote_ref.name)
+
+                if match:
+                    version_branches.append(VersionBranch(self, remote_ref, match.group(1), match.group(2)))
 
         # sort versions as (major, minor) tuples to ensure semantic ordering (1.10 > 1.2)
         version_branches.sort(key=lambda branch: branch.version)
 
-        return version_branches
+        if master_branch is None:
+            raise Exception('no master branch found')
+        return version_branches + [master_branch]
 
     @cached_property
     def stable_branch(self):
+        return self.remote_branches[-2]
+
+    @cached_property
+    def master_branch(self):
         return self.remote_branches[-1]
 
-    def update(self, branches=None, command_flags=None):
+    def update(self, branches=None, command_flags=''):
         print("Pulling from master")
         self.master_repo.remote().pull()
 
@@ -75,6 +86,9 @@ class Environment:
                 pass
             elif 'stable' in branches and branch == self.stable_branch:
                 # building 'stable', which is an alias to this branch
+                pass
+            elif 'latest' in branches and branch == self.master_branch:
+                # building 'latest', which is an alias to master
                 pass
             else:
                 # not building this branch
@@ -105,25 +119,10 @@ class Environment:
         return env
 
 
-class VersionBranch:
-    def __init__(self, env, remote_head, major_version, minor_version):
+class Branch:
+    def __init__(self, env, remote_head):
         self.env = env
         self.remote_head = remote_head
-        self.version = (int(major_version), int(minor_version))
-
-    @property
-    def version_string(self):
-        return '%d.%d' % self.version
-
-    @property
-    def local_name(self):
-        return 'stable/%d.%d.x' % self.version
-
-    def should_build(self):
-        return self.version >= (0, 4)
-
-    def python_version(self):
-        return 'python3.6' if self.version >= (1, 10) else 'python2.7'
 
     @cached_property
     def path(self):
@@ -137,46 +136,27 @@ class VersionBranch:
     def built_html_path(self):
         return os.path.join(self.docs_path, '_build', 'html')
 
-    def update_repo(self):
-        if os.path.exists(self.path):
-            # update the existing cloned repo for this version branch
-            repo = Repo(self.path)
-            print("Updating version %s" % self.version_string)
-            repo.remote().pull()
-        else:
-            # create a clone of the master repo checked out at this branch
-            print("Cloning version %s" % self.version_string)
-            repo = self.env.master_repo.clone(self.path, branch=self.local_name)
-
-        return repo
-
     @cached_property
     def virtualenv_path(self):
         return os.path.join(self.env.virtualenv_parent_path, self.version_string)
 
+    def copy_docs_dir(self, destination):
+        if os.path.exists(destination):
+            shutil.rmtree(destination, ignore_errors=False)
+        shutil.copytree(self.built_html_path, destination)
+
+    def install(self):
+        pip_cmd = os.path.join(self.virtualenv_path, 'bin', 'pip')
+        subprocess.check_call([pip_cmd, 'install', '-e', self.path + '[docs]'])
+
     def update(self, command_flags=''):
-        # create a local tracking branch for this version if none exists already
-        if not self.env.branch_name_exists_in_master_repo(self.local_name):
-            local_branch = self.env.master_repo.create_head(self.local_name, self.remote_head)
-            local_branch.set_tracking_branch(self.remote_head)
-
-        self.update_repo()
-
         if not self.should_build():
             return
 
         if not os.path.exists(self.virtualenv_path):
             subprocess.check_call(['virtualenv', self.virtualenv_path, '--python=%s' % self.python_version()])
 
-        pip_cmd = os.path.join(self.virtualenv_path, 'bin', 'pip')
-        if self.version >= (1, 4):
-            subprocess.check_call([pip_cmd, 'install', '-e', self.path + '[docs]'])
-        elif self.version >= (1, 0):
-            subprocess.check_call([pip_cmd, 'install', '-e', self.path])
-            subprocess.check_call([pip_cmd, 'install', '-r', os.path.join(self.path, 'requirements-dev.txt')])
-        else:
-            subprocess.check_call([pip_cmd, 'install', '-e', self.path])
-            subprocess.check_call([pip_cmd, 'install', 'Sphinx<2.0', 'sphinx-rtd-theme'])
+        self.install()
 
         activate_cmd = os.path.join(self.virtualenv_path, 'bin', 'activate')
 
@@ -191,17 +171,81 @@ class VersionBranch:
 
         os.makedirs(self.env.html_base_path, exist_ok=True)
 
-        html_path = os.path.join(self.env.html_base_path, 'en', 'v' + self.version_string)
+        html_path = os.path.join(self.env.html_base_path, 'en', self.target_dir_name)
         self.copy_docs_dir(html_path)
 
         if self == self.env.stable_branch:
             html_path = os.path.join(self.env.html_base_path, 'en', 'stable')
             self.copy_docs_dir(html_path)
 
-    def copy_docs_dir(self, destination):
-        if os.path.exists(destination):
-            shutil.rmtree(destination, ignore_errors=False)
-        shutil.copytree(self.built_html_path, destination)
+
+class MasterBranch(Branch):
+    version_string = 'master'
+    target_dir_name = 'latest'
+
+    def should_build(self):
+        return True
+
+    def python_version(self):
+        return 'python3.6'
+
+
+class VersionBranch(Branch):
+    def __init__(self, env, remote_head, major_version, minor_version):
+        super().__init__(env, remote_head)
+        self.version = (int(major_version), int(minor_version))
+
+    @property
+    def version_string(self):
+        return '%d.%d' % self.version
+
+    @property
+    def local_name(self):
+        return 'stable/%d.%d.x' % self.version
+
+    @property
+    def target_dir_name(self):
+        return 'v' + self.version_string
+
+    def should_build(self):
+        return self.version >= (0, 4)
+
+    def python_version(self):
+        return 'python3.6' if self.version >= (1, 10) else 'python2.7'
+
+    def update_repo(self):
+        if os.path.exists(self.path):
+            # update the existing cloned repo for this version branch
+            repo = Repo(self.path)
+            print("Updating version %s" % self.version_string)
+            repo.remote().pull()
+        else:
+            # create a clone of the master repo checked out at this branch
+            print("Cloning version %s" % self.version_string)
+            repo = self.env.master_repo.clone(self.path, branch=self.local_name)
+
+        return repo
+
+    def install(self):
+        pip_cmd = os.path.join(self.virtualenv_path, 'bin', 'pip')
+        if self.version >= (1, 4):
+            subprocess.check_call([pip_cmd, 'install', '-e', self.path + '[docs]'])
+        elif self.version >= (1, 0):
+            subprocess.check_call([pip_cmd, 'install', '-e', self.path])
+            subprocess.check_call([pip_cmd, 'install', '-r', os.path.join(self.path, 'requirements-dev.txt')])
+        else:
+            subprocess.check_call([pip_cmd, 'install', '-e', self.path])
+            subprocess.check_call([pip_cmd, 'install', 'Sphinx<2.0', 'sphinx-rtd-theme'])
+
+    def update(self, command_flags=''):
+        # create a local tracking branch for this version if none exists already
+        if not self.env.branch_name_exists_in_master_repo(self.local_name):
+            local_branch = self.env.master_repo.create_head(self.local_name, self.remote_head)
+            local_branch.set_tracking_branch(self.remote_head)
+
+        self.update_repo()
+
+        super().update(command_flags=command_flags)
 
 
 class PrintProgress(RemoteProgress):
