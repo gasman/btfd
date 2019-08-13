@@ -59,7 +59,7 @@ class Environment:
         return version_branches
 
     @cached_property
-    def latest_branch(self):
+    def stable_branch(self):
         return self.remote_branches[-1]
 
     def update(self, branches=None, command_flags=None):
@@ -73,7 +73,7 @@ class Environment:
             elif branch.version_string in branches:
                 # building this branch
                 pass
-            elif 'stable' in branches and branch == self.latest_branch:
+            elif 'stable' in branches and branch == self.stable_branch:
                 # building 'stable', which is an alias to this branch
                 pass
             else:
@@ -181,6 +181,9 @@ class VersionBranch:
         activate_cmd = os.path.join(self.virtualenv_path, 'bin', 'activate')
 
         command_flags += (' -A theme_canonical_url=%s' % CANONICAL_URL)
+        command_flags += ' -A display_github=1 -A github_user=wagtail -A github_repo=wagtail'
+        command_flags += ' -A github_version=master -A conf_py_path=/docs/'
+        command_flags += ' -D html_js_files=/versions.js'
         command = 'source %s && make -C %s html -e SPHINXOPTS=%s' % (
             shlex.quote(activate_cmd), shlex.quote(self.docs_path), shlex.quote(command_flags)
         )
@@ -191,7 +194,7 @@ class VersionBranch:
         html_path = os.path.join(self.env.html_base_path, 'en', 'v' + self.version_string)
         self.copy_docs_dir(html_path)
 
-        if self == self.env.latest_branch:
+        if self == self.env.stable_branch:
             html_path = os.path.join(self.env.html_base_path, 'en', 'stable')
             self.copy_docs_dir(html_path)
 
