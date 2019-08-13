@@ -1,6 +1,7 @@
 #!/usr/bin/env python
 
 import argparse
+import json
 import os
 import os.path
 import re
@@ -97,6 +98,18 @@ class Environment:
             print("Updating branch %s" % branch.version_string)
             branch.update(command_flags=command_flags)
 
+        versions_file_name = os.path.join(self.html_base_path, 'versions.js')
+        version_list = [
+            branch.target_dir_name
+            for branch in reversed(self.remote_branches)
+            if branch.should_build()
+        ]
+        version_list.insert(1, 'stable')
+
+        with open(versions_file_name, 'w') as f:
+            print("VERSIONS = %s;" % json.dumps(version_list), file=f)
+
+
     @staticmethod
     def create(repository_url, path=None):
         if path is None:
@@ -163,7 +176,7 @@ class Branch:
         command_flags += (' -A theme_canonical_url=%s' % CANONICAL_URL)
         command_flags += ' -A display_github=1 -A github_user=wagtail -A github_repo=wagtail'
         command_flags += ' -A github_version=master -A conf_py_path=/docs/'
-        command_flags += ' -D html_js_files=/versions.js'
+        command_flags += ' -D html_js_files=/versions.js,/version_listing.js'
         command = 'source %s && make -C %s html -e SPHINXOPTS=%s' % (
             shlex.quote(activate_cmd), shlex.quote(self.docs_path), shlex.quote(command_flags)
         )
