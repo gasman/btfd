@@ -14,6 +14,9 @@ from git import Repo
 from git.util import RemoteProgress
 
 
+CANONICAL_URL = 'https://docs.wagtail.io/en/stable/'
+
+
 class Environment:
     """
     represents a build environment consisting of multiple git checkouts within a root path
@@ -40,7 +43,8 @@ class Environment:
     def branch_name_exists_in_master_repo(self, name):
         return any(head.name == name for head in self.master_repo.heads)
 
-    def get_remote_branches(self):
+    @cached_property
+    def remote_branches(self):
         # find all remote branches matching the format origin/stable/N.N.x
         version_branches = []
         for remote_ref in self.master_repo.remote().refs:
@@ -54,14 +58,30 @@ class Environment:
 
         return version_branches
 
+    @cached_property
+    def latest_branch(self):
+        return self.remote_branches[-1]
+
     def update(self, branches=None, command_flags=None):
         print("Pulling from master")
         self.master_repo.remote().pull()
 
-        for branch in self.get_remote_branches():
-            if branches is None or branch.version_string in branches:
-                print("Updating branch %s" % branch.version_string)
-                branch.update(command_flags=command_flags)
+        for branch in self.remote_branches:
+            if branches is None:
+                # building all branches
+                pass
+            elif branch.version_string in branches:
+                # building this branch
+                pass
+            elif 'stable' in branches and branch == self.latest_branch:
+                # building 'stable', which is an alias to this branch
+                pass
+            else:
+                # not building this branch
+                continue
+
+            print("Updating branch %s" % branch.version_string)
+            branch.update(command_flags=command_flags)
 
     @staticmethod
     def create(repository_url, path=None):
@@ -134,11 +154,7 @@ class VersionBranch:
     def virtualenv_path(self):
         return os.path.join(self.env.virtualenv_parent_path, self.version_string)
 
-    @cached_property
-    def html_path(self):
-        return os.path.join(self.env.html_base_path, 'en', 'v' + self.version_string)
-
-    def update(self, command_flags=None):
+    def update(self, command_flags=''):
         # create a local tracking branch for this version if none exists already
         if not self.env.branch_name_exists_in_master_repo(self.local_name):
             local_branch = self.env.master_repo.create_head(self.local_name, self.remote_head)
@@ -163,17 +179,26 @@ class VersionBranch:
             subprocess.check_call([pip_cmd, 'install', 'Sphinx<2.0', 'sphinx-rtd-theme'])
 
         activate_cmd = os.path.join(self.virtualenv_path, 'bin', 'activate')
-        if command_flags:
-            command = 'source %s && make -C %s html -e SPHINXOPTS="%s"' % (
-                shlex.quote(activate_cmd), shlex.quote(self.docs_path), shlex.quote(command_flags)
-            )
-        else:
-            command = 'source %s && make -C %s html' % (shlex.quote(activate_cmd), shlex.quote(self.docs_path))
+
+        command_flags += (' -A theme_canonical_url=%s' % CANONICAL_URL)
+        command = 'source %s && make -C %s html -e SPHINXOPTS=%s' % (
+            shlex.quote(activate_cmd), shlex.quote(self.docs_path), shlex.quote(command_flags)
+        )
         subprocess.check_call(command, shell=True)
-        if os.path.exists(self.html_path):
-            shutil.rmtree(self.html_path, ignore_errors=False)
+
         os.makedirs(self.env.html_base_path, exist_ok=True)
-        shutil.copytree(self.built_html_path, self.html_path)
+
+        html_path = os.path.join(self.env.html_base_path, 'en', 'v' + self.version_string)
+        self.copy_docs_dir(html_path)
+
+        if self == self.env.latest_branch:
+            html_path = os.path.join(self.env.html_base_path, 'en', 'stable')
+            self.copy_docs_dir(html_path)
+
+    def copy_docs_dir(self, destination):
+        if os.path.exists(destination):
+            shutil.rmtree(destination, ignore_errors=False)
+        shutil.copytree(self.built_html_path, destination)
 
 
 class PrintProgress(RemoteProgress):
